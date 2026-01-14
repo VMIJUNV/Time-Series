@@ -1,0 +1,9 @@
+output_path: "method/RNN/output"
+
+train_epochs: 100
+checkpoint_strategy: "no"
+device: "cuda"
+
+val_strategy: "epoch"
+val_interval: 1
+save_best_model: True
