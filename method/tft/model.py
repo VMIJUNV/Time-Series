@@ -17,41 +17,23 @@ from dataclasses import dataclass, field
 
 from utils.more_utils import BaseDataclass
 
-
-
 @dataclass
 class Hparams(BaseDataclass):
-
-    # 输入的特征数量，包含定量变量和定性变量，定性变量放在后面。所有的定性变量需要在category_counts中指定类别数量
     input_size: int = None
-
-    # 输出的特征数量
     output_size: int = None
-
-    # 编码器的时间步长
     num_encoder_steps: int = None
-
-    # 输出的分位数
     quantiles: list = field(default_factory=lambda: [0.5])
 
-    # 定性变量的类别数量。若有多个定性变量，则列表设定多个值
     category_counts: list = field(default_factory=lambda: [])
-
-    # 观测变量索引。偏移相对于input
     input_obs_loc: list = field(default_factory=lambda: [])
-
-    # 静态变量索引。偏移相对于input
     static_input_loc: list = field(default_factory=lambda: [])
-
-    # 已知的定量变量索引。偏移相对于input中的定量变量
     known_regular_inputs: list = field(default_factory=lambda: [])
-
-    # 已知的定性变量索引。偏移相对于input中的定性变量
     known_categorical_inputs: list = field(default_factory=lambda: [])
 
     hidden_layer_size: int = 160
     dropout_rate: float = 0.1
     num_heads: int = 4
+    num_lstm_layers: int = 1
 
 
 class TemporalFusionTransformer(nn.Module):
@@ -78,6 +60,7 @@ class TemporalFusionTransformer(nn.Module):
         
         # Network params
         self.quantiles = hparams.quantiles
+        self.num_lstm_layers = hparams.num_lstm_layers
         self.hidden_layer_size = hparams.hidden_layer_size
         self.dropout_rate = hparams.dropout_rate
         self.num_encoder_steps = hparams.num_encoder_steps
@@ -133,7 +116,7 @@ class TemporalFusionTransformer(nn.Module):
 #                 torch.nn.init.kaiming_normal_(p, a=0, mode='fan_in', nonlinearity='sigmoid')
             elif ('lstm' in name and 'hh' in name) and 'bias' not in name:
         
-                 torch.nn.init.orthogonal_(p)
+                torch.nn.init.orthogonal_(p)
             
             elif 'lstm' in name and 'bias' in name:
                 torch.nn.init.zeros_(p)
@@ -143,18 +126,18 @@ class TemporalFusionTransformer(nn.Module):
         obs_inputs = [i for i in self._input_obs_loc]
         
         known_regular_inputs = [i for i in self._known_regular_input_idx
-                                if i not in self._static_input_loc]
+                                    if i not in self._static_input_loc]
             
         known_categorical_inputs = [i for i in self._known_categorical_input_idx
                                     if i + self.num_regular_variables not in self._static_input_loc]
         
         wired_embeddings = [i for i in range(self.num_categorical_variables)
-                            if i not in self._known_categorical_input_idx 
-                            and i not in self._input_obs_loc]
+                                if i not in self._known_categorical_input_idx 
+                                and i not in self._input_obs_loc]
 
         unknown_inputs = [i for i in range(self.num_regular_variables)
-                          if i not in self._known_regular_input_idx
-                          and i not in self._input_obs_loc]
+                            if i not in self._known_regular_input_idx
+                            and i not in self._input_obs_loc]
 
         return len(obs_inputs+known_regular_inputs+known_categorical_inputs+wired_embeddings+unknown_inputs)
     
@@ -169,91 +152,82 @@ class TemporalFusionTransformer(nn.Module):
         return len(known_regular_inputs + known_categorical_inputs)
     
     def build_embeddings(self):
-        self.categorical_var_embeddings = nn.ModuleList([nn.Embedding(self.category_counts[i], 
-                                                                      self.hidden_layer_size) 
-                                                     for i in range(self.num_categorical_variables)])
+        self.categorical_var_embeddings = nn.ModuleList([nn.Embedding(self.category_counts[i], self.hidden_layer_size) for i in range(self.num_categorical_variables)])
 
-        self.regular_var_embeddings = nn.ModuleList([nn.Linear(1, 
-                                                              self.hidden_layer_size) 
-                                                  for i in range(self.num_regular_variables)])
+        self.regular_var_embeddings = nn.ModuleList([nn.Linear(1,self.hidden_layer_size) for i in range(self.num_regular_variables)])
 
     def build_variable_selection_networks(self):
         
         self.static_vsn = VariableSelectionNetwork(hidden_layer_size = self.hidden_layer_size,
                                                    input_size = self.hidden_layer_size * len(self._static_input_loc),
-                                                   output_size = len(self._static_input_loc),
-                                                   dropout_rate = self.dropout_rate)
+                                                    output_size = len(self._static_input_loc),
+                                                    dropout_rate = self.dropout_rate)
         
         self.temporal_historical_vsn = VariableSelectionNetwork(hidden_layer_size = self.hidden_layer_size,
-                                                                input_size = self.hidden_layer_size *
-                                                                        self.num_non_static_historical_inputs,
+                                                                input_size = self.hidden_layer_size *self.num_non_static_historical_inputs,
                                                                 output_size = self.num_non_static_historical_inputs,
                                                                 dropout_rate = self.dropout_rate,
                                                                 additional_context=self.hidden_layer_size)
         
         self.temporal_future_vsn = VariableSelectionNetwork(hidden_layer_size = self.hidden_layer_size,
-                                                            input_size = self.hidden_layer_size *
-                                                                        self.num_non_static_future_inputs,
+                                                            input_size = self.hidden_layer_size *self.num_non_static_future_inputs,
                                                             output_size = self.num_non_static_future_inputs,
                                                             dropout_rate = self.dropout_rate,
                                                             additional_context=self.hidden_layer_size)
         
     def build_static_context_networks(self):
         
-        self.static_context_variable_selection_grn = GatedResidualNetwork(self.hidden_layer_size,
-                                                                          dropout_rate=self.dropout_rate)
+        self.static_context_variable_selection_grn = GatedResidualNetwork(self.hidden_layer_size,dropout_rate=self.dropout_rate)
         
-        self.static_context_enrichment_grn = GatedResidualNetwork(self.hidden_layer_size,
-                                                              dropout_rate=self.dropout_rate)
+        self.static_context_enrichment_grn = GatedResidualNetwork(self.hidden_layer_size,dropout_rate=self.dropout_rate)
 
-        self.static_context_state_h_grn = GatedResidualNetwork(self.hidden_layer_size,
-                                                           dropout_rate=self.dropout_rate)
+        self.static_context_state_h_grn = GatedResidualNetwork(self.hidden_layer_size,dropout_rate=self.dropout_rate)
         
-        self.static_context_state_c_grn = GatedResidualNetwork(self.hidden_layer_size,
-                                                           dropout_rate=self.dropout_rate)
+        self.static_context_state_c_grn = GatedResidualNetwork(self.hidden_layer_size,dropout_rate=self.dropout_rate)
         
     def build_lstm(self):
         self.historical_lstm = nn.LSTM(input_size = self.hidden_layer_size,
-                                       hidden_size = self.hidden_layer_size,
-                                       batch_first = True)
+                                        hidden_size = self.hidden_layer_size,
+                                        num_layers=self.num_lstm_layers,
+                                        batch_first = True)
         self.future_lstm = nn.LSTM(input_size = self.hidden_layer_size,
-                                   hidden_size = self.hidden_layer_size,
-                                   batch_first = True)
+                                    hidden_size = self.hidden_layer_size,
+                                    num_layers=self.num_lstm_layers,
+                                    batch_first = True)
         
     def build_post_lstm_gate_add_norm(self):
         self.post_seq_encoder_gate_add_norm = GateAddNormNetwork(self.hidden_layer_size,
-                                                                 self.hidden_layer_size,
-                                                                 self.dropout_rate,
-                                                                 activation = None)
+                                                                self.hidden_layer_size,
+                                                                self.dropout_rate,
+                                                                activation = None)
         
     def build_static_enrichment(self):
         self.static_enrichment = GatedResidualNetwork(self.hidden_layer_size,
-                                                      dropout_rate = self.dropout_rate,
-                                                      additional_context=self.hidden_layer_size)
+                                                    dropout_rate = self.dropout_rate,
+                                                    additional_context=self.hidden_layer_size)
         
     def build_temporal_self_attention(self):
         self.self_attn_layer = InterpretableMultiHeadAttention(n_head = self.num_heads, 
-                                                               d_model = self.hidden_layer_size,
-                                                               dropout = self.dropout_rate)
+                                                                d_model = self.hidden_layer_size,
+                                                                dropout = self.dropout_rate)
         
         self.post_attn_gate_add_norm = GateAddNormNetwork(self.hidden_layer_size,
-                                                           self.hidden_layer_size,
-                                                           self.dropout_rate,
-                                                           activation = None)
+                                                            self.hidden_layer_size,
+                                                            self.dropout_rate,
+                                                            activation = None)
         
     def build_position_wise_feed_forward(self):
         self.GRN_positionwise = GatedResidualNetwork(self.hidden_layer_size,
-                                                     dropout_rate = self.dropout_rate)
+                                                        dropout_rate = self.dropout_rate)
         
         self.post_tfd_gate_add_norm = GateAddNormNetwork(self.hidden_layer_size,
-                                                         self.hidden_layer_size,
-                                                         self.dropout_rate,
-                                                         activation = None)
+                                                            self.hidden_layer_size,
+                                                            self.dropout_rate,
+                                                            activation = None)
         
     def build_output_feed_forward(self):
-        self.output_feed_forward = torch.nn.Linear(self.hidden_layer_size, 
-                                                   self.output_size * len(self.quantiles))
-         
+        self.output_feed_forward = torch.nn.Linear(self.hidden_layer_size,self.output_size * len(self.quantiles))
+
     def get_decoder_mask(self, self_attn_inputs):
         """Returns causal mask to apply for self-attention layer.
         Args:
@@ -263,7 +237,6 @@ class TemporalFusionTransformer(nn.Module):
         bs = self_attn_inputs.shape[0]
         mask = torch.cumsum(torch.eye(len_s,device=self_attn_inputs.device), 0)
         mask = mask.repeat(bs,1,1).to(torch.float32)
-
         return mask
     
     def get_tft_embeddings(self, regular_inputs, categorical_inputs):
@@ -273,7 +246,7 @@ class TemporalFusionTransformer(nn.Module):
                                     for i in range(self.num_regular_variables)
                                     if i in self._static_input_loc]
             
-            static_categorical_inputs = [self.categorical_var_embeddings[i](categorical_inputs[Ellipsis, i])[:,0,:] 
+            static_categorical_inputs = [self.categorical_var_embeddings[i](categorical_inputs[..., i])[:,0,:] 
                                         for i in range(self.num_categorical_variables)
                                         if i + self.num_regular_variables in self._static_input_loc]
             
@@ -282,7 +255,7 @@ class TemporalFusionTransformer(nn.Module):
             static_inputs = None
             
         # Target input
-        obs_inputs = torch.stack([self.regular_var_embeddings[i](regular_inputs[Ellipsis, i:i + 1])
+        obs_inputs = torch.stack([self.regular_var_embeddings[i](regular_inputs[..., i:i + 1])
                                     for i in self._input_obs_loc], axis=-1)
         
         # Observed (a prioir unknown) inputs
@@ -297,7 +270,7 @@ class TemporalFusionTransformer(nn.Module):
         for i in range(self.num_regular_variables):
             if i not in self._known_regular_input_idx \
             and i not in self._input_obs_loc:
-                e = self.regular_var_embeddings[i](regular_inputs[Ellipsis, i:i + 1])
+                e = self.regular_var_embeddings[i](regular_inputs[..., i:i + 1])
                 unknown_inputs.append(e)
                 
         if unknown_inputs + wired_embeddings:
@@ -306,11 +279,11 @@ class TemporalFusionTransformer(nn.Module):
             unknown_inputs = None
             
         # A priori known inputs
-        known_regular_inputs = [self.regular_var_embeddings[i](regular_inputs[Ellipsis, i:i + 1])
+        known_regular_inputs = [self.regular_var_embeddings[i](regular_inputs[..., i:i + 1])
                                 for i in self._known_regular_input_idx
                                 if i not in self._static_input_loc]
         
-        known_categorical_inputs = [self.categorical_var_embeddings[i](categorical_inputs[Ellipsis, i])
+        known_categorical_inputs = [self.categorical_var_embeddings[i](categorical_inputs[..., i])
                                     for i in self._known_categorical_input_idx
                                     if i + self.num_regular_variables not in self._static_input_loc]
 
@@ -323,21 +296,20 @@ class TemporalFusionTransformer(nn.Module):
         regular_inputs = all_inputs[:, :, :self.num_regular_variables].to(torch.float)
         categorical_inputs = all_inputs[:, :, self.num_regular_variables:].to(torch.long)
         
-        unknown_inputs, known_combined_layer, obs_inputs, static_inputs \
-            = self.get_tft_embeddings(regular_inputs, categorical_inputs)
+        unknown_inputs, known_combined_layer, obs_inputs, static_inputs = self.get_tft_embeddings(regular_inputs, categorical_inputs)
         
         # Isolate known and observed historical inputs.
         if unknown_inputs is not None:
-              historical_inputs = torch.cat([
-                  unknown_inputs[:, :self.num_encoder_steps, :],
-                  known_combined_layer[:, :self.num_encoder_steps, :],
-                  obs_inputs[:, :self.num_encoder_steps, :]
-              ], axis=-1)
+            historical_inputs = torch.cat([
+                unknown_inputs[:, :self.num_encoder_steps, :],
+                known_combined_layer[:, :self.num_encoder_steps, :],
+                obs_inputs[:, :self.num_encoder_steps, :]
+            ], axis=-1)
         else:
-              historical_inputs = torch.cat([
-                  known_combined_layer[:, :self.num_encoder_steps, :],
-                  obs_inputs[:, :self.num_encoder_steps, :]
-              ], axis=-1)
+            historical_inputs = torch.cat([
+                known_combined_layer[:, :self.num_encoder_steps, :],
+                obs_inputs[:, :self.num_encoder_steps, :]
+            ], axis=-1)
         
         # Isolate only known future inputs.
         future_inputs = known_combined_layer[:, self.num_encoder_steps:, :]
@@ -348,22 +320,16 @@ class TemporalFusionTransformer(nn.Module):
         static_context_state_h = self.static_context_state_h_grn(static_encoder)
         static_context_state_c = self.static_context_state_c_grn(static_encoder)
         
-        historical_features, historical_flags \
-        = self.temporal_historical_vsn((historical_inputs,
-                                        static_context_variable_selection))
+        historical_features, historical_flags = self.temporal_historical_vsn((historical_inputs,static_context_variable_selection))
         
-        future_features, future_flags \
-        = self.temporal_future_vsn((future_inputs,
-                                    static_context_variable_selection))
+        future_features, future_flags = self.temporal_future_vsn((future_inputs,static_context_variable_selection))
         
-        history_lstm, (state_h, state_c) \
-        = self.historical_lstm(historical_features,
-                               (static_context_state_h.unsqueeze(0),
-                                static_context_state_c.unsqueeze(0)))
+        static_context_state_h_= static_context_state_h.unsqueeze(0).repeat(self.num_lstm_layers, 1, 1)
+        static_context_state_c_ = static_context_state_c.unsqueeze(0).repeat(self.num_lstm_layers, 1, 1)
         
-        future_lstm, _ = self.future_lstm(future_features,
-                                          (state_h,
-                                           state_c))
+        history_lstm, (state_h, state_c) = self.historical_lstm(historical_features,(static_context_state_h_,static_context_state_c_))
+        
+        future_lstm, _ = self.future_lstm(future_features,(state_h,state_c))
         
         # Apply gated skip connection
         input_embeddings = torch.cat((historical_features, future_features), axis=1)
@@ -376,10 +342,7 @@ class TemporalFusionTransformer(nn.Module):
         expanded_static_context = static_context_enrichment.unsqueeze(1)
         
         enriched = self.static_enrichment((temporal_feature_layer, expanded_static_context))
-        x, self_att = self.self_attn_layer(enriched, 
-                                           enriched, 
-                                           enriched,
-                                           mask = self.get_decoder_mask(enriched))
+        x, self_att = self.self_attn_layer(enriched, enriched, enriched,mask = self.get_decoder_mask(enriched))
         
         x = self.post_attn_gate_add_norm(x, enriched)
         
@@ -388,6 +351,6 @@ class TemporalFusionTransformer(nn.Module):
 
         # Final skip connection
         transformer_layer = self.post_tfd_gate_add_norm(decoder, temporal_feature_layer)
-        outputs = self.output_feed_forward(transformer_layer[Ellipsis, self.num_encoder_steps:, :])
+        outputs = self.output_feed_forward(transformer_layer[..., self.num_encoder_steps:, :])
         
         return outputs

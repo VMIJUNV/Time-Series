@@ -2,56 +2,59 @@ import sys
 sys.path.append(".")
 
 import torch
+import yaml
 from model import TemporalFusionTransformer,Hparams
-from utils.dataset import TimeSeriesDataset
-from utils.trainer import BaseTrainer, TrainerArguments
+from utils.dataset import TimeSeriesSeqDataset
+from trainer.trainer import BaseTrainer, TrainerArguments
 
 class Trainer(BaseTrainer):
-    def configure_optimizers(self):
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+    def __init__(self,args):
+        super().__init__(args)
+        
+        self.input_steps = config["datasets"]["input_steps"]
+        self.label_steps = config["datasets"]["label_steps"]
+
+        hparams = Hparams.from_dict(config["model"])
+        self.model = TemporalFusionTransformer(hparams)
+        
+        self.train_dataset = TimeSeriesSeqDataset(config["datasets"]["data_path"], split="train")
+        self.val_dataset = TimeSeriesSeqDataset(config["datasets"]["data_path"], split="val")
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr_rate)
+
 
     def loss(self, y_hat, y):
-        return self.model.train_criterion.apply(y_hat, y)
+        # return self.model.train_criterion.apply(y_hat, y)
+        return torch.nn.functional.mse_loss(y_hat, y)
 
     def training_forward(self, batch):
-        x=batch["x"]
-        y=batch["label"]
-        x = x.to(self.device)
-        y = y.to(self.device)
-        y=y[:,self.model.num_encoder_steps:,:]
+        x=batch["x"].to(self.device)
+        label=batch["label"].to(self.device)
 
-        y_hat = self.model(x)
-        loss = self.loss(y_hat,y)
-        return loss,{'train_loss': loss.item()}
+        x=x[:, self.input_steps[0]:self.input_steps[1], :]
+        label=label[:,self.label_steps[0]:self.label_steps[1], :]
+
+        pred = self.model(x)
+        loss = self.loss(pred, label)
+        self.log("train_loss",loss.item())
+        return loss
     
     def validation_forward(self, batch):
-        x=batch["x"]
-        y=batch["label"]
-        x = x.to(self.device)
-        y = y.to(self.device)
-        y=y[:,self.model.num_encoder_steps:,:]
+        x=batch["x"].to(self.device)
+        label=batch["label"].to(self.device)
 
-        y_hat = self.model(x)
-        loss = self.loss(y_hat, y)
-        return {'val_loss': loss.item()}
+        x=x[:, self.input_steps[0]:self.input_steps[1], :]
+        label=label[:, self.label_steps[0]:self.label_steps[1], :]
+        
+        pred = self.model(x)
+        loss = self.loss(pred, label)
+        self.log("val_loss",loss.item())
 
 if __name__ == "__main__":
-    model_config_path = "method/tft/config/model.yaml"
-    train_config_path = "method/tft/config/trainer.yaml"
-    data_path = "data/sse50/data.pkl"
+    config_path = "method/tft/config/config.yaml"
 
-    train_dataset = TimeSeriesDataset(data_path, split="train")
-    val_dataset = TimeSeriesDataset(data_path, split="val")
-
-    hparams=Hparams.from_yaml(model_config_path)
-    model = TemporalFusionTransformer(hparams=hparams)
-
-    args = TrainerArguments.from_yaml(train_config_path)
-
-    trainer = Trainer(
-        model = model,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        args=args
-        )
-    trainer.train(resume_from_checkpoint=False)
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
+    
+    args = TrainerArguments.from_dict(config["trainer"])
+    trainer = Trainer(args)
+    trainer.train()

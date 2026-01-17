@@ -5,10 +5,6 @@ from torch import tanh
 from torch import nn
 import torch
 
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping
-
-import sklearn.preprocessing
 
 class GatedLinearUnit(nn.Module):
     def __init__(self, input_size,

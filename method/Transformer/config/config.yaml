@@ -1,0 +1,35 @@
+model:
+  input_size:  9
+  hidden_size: 1024
+  output_size: 6
+  num_heads: 8
+  num_layers: 4
+  dropout: 0.1
+
+trainer:
+  device: "cuda"
+  output_path: "method/Transformer/output"
+  train_epochs: 100
+  lr_rate: 0.001
+
+  val_interval_monitor: "epoch"
+  val_interval: 1
+
+  callback:
+    - type: "CheckpointManager"
+      path: "best_model"
+      interval_monitor: "val_step"
+      interval: 1
+      monitor: "val_loss"
+      monitor_mode: "min"
+      max_checkpoints: 3
+
+datasets:
+  data_path: "data/hgjj/data.pkl"
+  input_steps: [0, 12]
+  label_steps: [12, 13]
+
+eval:
+  checkpoint_path: "method/Transformer/output/best_model"
+  batch_size: 32
+  output_path: "method/Transformer/result"

@@ -26,5 +26,5 @@ class RNN(nn.Module):
         # x: (batch_size, seq_len, input_size)
         h0 = torch.zeros(1, x.size(0), self.hidden_size).to(x.device)
         out, _ = self.rnn(x, h0)
-        out = self.fc(out[:, -1, :])
+        out = self.fc(out[:, -1:, :])
         return out

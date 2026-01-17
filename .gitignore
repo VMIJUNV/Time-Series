@@ -217,7 +217,9 @@ __marimo__/
 
 # customer
 **/output/
+**/result/
 *.pkl
+*.xlsx
 
 
 /废案子

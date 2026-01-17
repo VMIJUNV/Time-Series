@@ -1,0 +1,56 @@
+model:
+  # 输入的特征数量，包含定量变量和定性变量，定性变量放在后面。所有的定性变量需要在category_counts中指定类别数量
+  input_size: 9
+  # 输出的特征数量
+  output_size: 6
+  # 编码器的时间步长
+  num_encoder_steps: 12
+  # 输出的分位数
+  quantiles: [0.5]
+
+  # 定性变量的类别数量。若有多个定性变量，则列表设定多个值
+  category_counts: [5]
+
+  # 观测变量索引。偏移相对于input
+  input_obs_loc: [0,1,2,3,4,5]
+  # 静态变量索引。偏移相对于input
+  static_input_loc: [8]
+  # 已知的定量变量索引。偏移相对于input中的定量变量
+  known_regular_inputs: [6,7]
+  # 已知的定性变量索引。偏移相对于input中的定性变量
+  known_categorical_inputs: []
+
+
+  hidden_layer_size: 40
+  dropout_rate: 0.1
+  num_heads: 2
+  num_lstm_layers: 2
+
+
+trainer:
+  device: "cuda"
+  output_path: "method/tft/output"
+  train_epochs: 100
+  lr_rate: 0.001
+
+  val_interval_monitor: "epoch"
+  val_interval: 1
+
+  callback:
+    - type: "CheckpointManager"
+      path: "best_model"
+      interval_monitor: "val_step"
+      interval: 1
+      monitor: "val_loss"
+      monitor_mode: "min"
+      max_checkpoints: 3
+
+datasets:
+  input_steps: [0,13]
+  label_steps: [12,13]
+  data_path: "data/hgjj/data.pkl"
+
+eval:
+  checkpoint_path: "method/tft/output/best_model"
+  batch_size: 32
+  output_path: "method/tft/result"

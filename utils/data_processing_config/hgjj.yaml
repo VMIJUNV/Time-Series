@@ -1,0 +1,20 @@
+data_path: "data/hgjj/hgjj.csv"
+output_path: "data/hgjj/data.pkl"
+
+id_col: "ts_code"
+time_col: "trade_date"
+
+# 需要标准化的列
+normalization_cols: ["GFP", "PIS", "NEXP", "INTER", "M2", "FISCAL"]
+
+feature_cols: ["GFP", "PIS", "NEXP", "INTER", "M2", "FISCAL", "month", "week", "category_id"]
+target_cols: ["GFP", "PIS", "NEXP", "INTER", "M2", "FISCAL"]
+
+# 滑动窗口大小
+window_size: 13
+
+train_range: ["2008-01-31", "2018-01-30"]
+val_range: ["2016-01-31", "2019-1-30"]
+test_range: ["2019-1-31", "2021-9-30"]
+
+

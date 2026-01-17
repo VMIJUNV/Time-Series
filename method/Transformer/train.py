@@ -1,50 +1,54 @@
 import sys
 sys.path.append(".")
 
+import yaml
 
 import torch
 
 from utils.dataset import TimeSeriesDataset
-from utils.trainer import BaseTrainer, TrainerArguments
+from trainer.trainer import BaseTrainer, TrainerArguments
 from model import Transformer, Hparams
 
 class Trainer(BaseTrainer):
-    def configure_optimizers(self):
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=0.001)
+    def __init__(self,args):
+        super().__init__(args)
+
+        self.input_steps = config["datasets"]["input_steps"]
+        self.label_steps = config["datasets"]["label_steps"]
+        
+        hparams = Hparams.from_dict(config["model"])
+        self.model = Transformer(hparams)
+        
+        self.train_dataset = TimeSeriesDataset(config["datasets"]["data_path"], split="train")
+        self.val_dataset = TimeSeriesDataset(config["datasets"]["data_path"], split="val")
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=args.lr_rate)
+
 
     def training_forward(self, batch):
         x=batch["x"].to(self.device)
         label=batch["label"].to(self.device)
-        label=label[:, -1, :]
+        x=x[:, self.input_steps[0]:self.input_steps[1], :]
+        label=label[:, self.label_steps[0]:self.label_steps[1], :]
         pred = self.model(x)
         loss = torch.nn.functional.mse_loss(pred, label)
-        return loss, {"train_loss":loss.item()}
+        self.log("train_loss",loss.item())
+        return loss
     
     def validation_forward(self, batch):
         x=batch["x"].to(self.device)
         label=batch["label"].to(self.device)
-        label=label[:, -1, :]
+        x=x[:, self.input_steps[0]:self.input_steps[1], :]
+        label=label[:, self.label_steps[0]:self.label_steps[1], :]
         pred = self.model(x)
         loss = torch.nn.functional.mse_loss(pred, label)
-        return {"val_loss":loss.item()}
+        self.log("val_loss",loss.item())
 
 if __name__ == "__main__":
-    model_config_path = "method/Transformer/config/model.yaml"
-    train_config_path = "method/Transformer/config/trainer.yaml"
-    data_path = "data/sse50/data_AR.pkl"
+    config_path = "method/Transformer/config/config.yaml"
+
+    with open(config_path, "r") as f:
+        config = yaml.safe_load(f)
     
-    train_dataset = TimeSeriesDataset(data_path, split="train")
-    val_dataset = TimeSeriesDataset(data_path, split="val")
-
-    hparams = Hparams.from_yaml(model_config_path)
-    model = Transformer(hparams)
-
-    args = TrainerArguments.from_yaml(train_config_path)
-
-    trainer = Trainer(
-        model = model,
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        args=args
-        )
-    trainer.train(resume_from_checkpoint=False)
+    args = TrainerArguments.from_dict(config["trainer"])
+    trainer = Trainer(args)
+    trainer.train()

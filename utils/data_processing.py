@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 import pickle
-from sklearn.preprocessing import StandardScaler
 from dataclasses import dataclass, field
 from utils.more_utils import BaseDataclass
 
@@ -17,230 +16,173 @@ class DataProcessingArgs(BaseDataclass):
     id_col: str = "code"
     time_col: str = "date"
 
+    normalization_cols: list = field(default_factory=list)
+
     feature_cols: list = field(default_factory=list)
-    normalization_feature_cols: list = field(default_factory=list)
-
     target_cols: list = field(default_factory=list)
-    normalization_target_cols: list = field(default_factory=list)
-    #-1为预测下一期。0为预测当前期
-    target_shift_step: int = 0 
-
-    missing_mode: str = "drop"
+    
     window_size: int = 10
 
-    train_ratio: float = 0.7
-    val_ratio: float = 0.15
-    test_ratio: float = 0.15
+    train_range: list = field(default_factory=list)
+    val_range: list = field(default_factory=list)
+    test_range: list = field(default_factory=list)
 
 class DataProcessing:
     def __init__(self,args:DataProcessingArgs):
         self.args = args
         self.feature_cols = self.args.feature_cols
-        self.normalization_feature_cols = self.args.normalization_feature_cols
+        self.normalization_cols = self.args.normalization_cols
         self.target_cols = self.args.target_cols
-        self.normalization_target_cols = self.args.normalization_target_cols
-        self.label_cols = ["label_"+col for col in self.target_cols]
 
         self.data_path = Path(args.data_path)
         self.data_origin = pd.read_csv(self.data_path)
         
         self.prepare()
         self.handle_missing()
-        self.build_labels()
-        self.build_sequences()
         self.split_data()
         self.scale_data()
-        self.save_data()
+        self.build_data()
 
     # 准备
     def prepare(self):
         self.data = self.data_origin.copy()
-        self.data["time_col"] = pd.to_datetime(self.data[self.args.time_col])
-        self.data["time_col"] = pd.factorize(self.data["time_col"], sort=True)[0]
-
         self.data["id_col"] = self.data[self.args.id_col]
-        
-        self.data=self.data.sort_values(["id_col","time_col"])
+        self.data["time_col"] = pd.to_datetime(self.data[self.args.time_col])
 
+        self.data = self.data.sort_values(["id_col","time_col"])
         self.time_set = self.data["time_col"].unique()
-        self.start_time = self.time_set[0]
-        self.end_time = self.time_set[-1]
-
-        self.id_set = self.data["id_col"].unique()
 
     # 异常处理
     def handle_missing(self):
-        mode = self.args.missing_mode
         all_cols = list(set(self.feature_cols + self.target_cols))
+        expected_time_set = set(self.time_set)
 
-        if mode == "drop":
-            valid_ids = []
-            grouped = self.data.groupby("id_col")
-            for id_val, group in grouped:
-                if set(group["time_col"]) != set(self.time_set):
-                    continue
-                if group[all_cols].isnull().values.any():
-                    continue
-                valid_ids.append(id_val)
-            self.data = self.data[self.data["id_col"].isin(valid_ids)]
+        def is_valid_group(group):
+            # 1. 检查时间点是否完整
+            time_check = set(group["time_col"]) == expected_time_set
+            # 2. 检查是否有缺失值 (any().any() 检查整个子表)
+            null_check = not group[all_cols].isnull().any().any()
+            return time_check and null_check
 
-        self.data.loc[:, "id_col"], uniques = pd.factorize(self.data["id_col"])
+        # 过滤并更新
+        self.data = self.data.groupby("id_col").filter(is_valid_group)
         self.id_set = self.data["id_col"].unique()
+
+        print("id count:", len(self.id_set))
+        print("time count:", len(self.time_set))
+        print("start time:", self.time_set[0])
+        print("end time:", self.time_set[-1])
+
+    def split_data(self):
+        self.time_set
+
+        train_range = [pd.to_datetime(t) for t in self.args.train_range]
+        val_range = [pd.to_datetime(t) for t in self.args.val_range]
+        test_range = [pd.to_datetime(t) for t in self.args.test_range]
+
+        train_times = self.time_set[(self.time_set >= train_range[0]) & (self.time_set <= train_range[1])]
+        val_times = self.time_set[(self.time_set >= val_range[0]) & (self.time_set <= val_range[1])]
+        test_times = self.time_set[(self.time_set >= test_range[0]) & (self.time_set <= test_range[1])]
+
+        self.data.loc[self.data["time_col"].isin(train_times), "train_split"] = True
+        self.data.loc[self.data["time_col"].isin(val_times), "val_split"] = True
+        self.data.loc[self.data["time_col"].isin(test_times), "test_split"] = True
         ...
 
-    # 构建标签
-    def build_labels(self):
-        for i, col in enumerate(self.target_cols):
-            self.data[self.label_cols[i]] = (
-                self.data
-                .groupby("id_col")[col]
-                .shift(self.args.target_shift_step)
-            )
-        self.data = self.data.dropna(subset=self.label_cols)
+    def scale_data(self):
+        train_data = self.data[self.data["train_split"]==True]
+        scaler_mean = train_data[self.normalization_cols].mean()
+        scaler_std = train_data[self.normalization_cols].std()
+
+        self.data[self.normalization_cols] = (self.data[self.normalization_cols] - scaler_mean) / scaler_std
+
+        self.scaler_mean =dict(scaler_mean)
+        self.scaler_std =dict(scaler_std)
 
     # 构建数据序列
-    def build_sequences(self):
-        # X:(N,T,F) Y:(N,T,L)
-        X = []
-        Y = []
-
-        for id_val in self.id_set:
-            group = self.data[self.data["id_col"] == id_val]
-            X.append(group[self.feature_cols].values)
-            Y.append(group[self.label_cols].values)
-        X = np.stack(X, axis=0)
-        Y = np.stack(Y, axis=0)
-
-        # Seq_X:(S,N,WS,F) Seq_Y:(S,N,WS,L)
-        Seq_X = []
-        Seq_Y = []
-
-        window_size = self.args.window_size
-        _, T, _ = X.shape
-        S = T - window_size + 1
-
-        for s in range(S):
-            Seq_X.append(X[:, s:s+window_size, :])  # (N, WS, F)
-            Seq_Y.append(Y[:, s:s+window_size, :])  # (N, WS, L)
-
-        self.Seq_X = np.stack(Seq_X, axis=0)
-        self.Seq_Y = np.stack(Seq_Y, axis=0)
-    
-    # 数据划分
-    def split_data(self):
-
-        train_ratio = self.args.train_ratio
-        val_ratio = self.args.val_ratio
-        test_ratio = self.args.test_ratio
-
-        S, N, WS, F = self.Seq_X.shape
-        S_train = int(S * train_ratio)
-        S_val = int(S * val_ratio)
-        S_test = S - S_train - S_val
-
-        self.train_Seq_X = self.Seq_X[:S_train]
-        self.train_Seq_Y = self.Seq_Y[:S_train]
-
-        self.val_Seq_X = self.Seq_X[S_train:S_train+S_val]
-        self.val_Seq_Y = self.Seq_Y[S_train:S_train+S_val]
-
-        self.test_Seq_X = self.Seq_X[S_train+S_val:]
-        self.test_Seq_Y = self.Seq_Y[S_train+S_val:]
-
-    # 数据标准化
-    def scale_data(self):
-
-        scalerX = StandardScaler()
+    def build_data(self):
         
-        norm_indices = [self.feature_cols.index(col) for col in self.normalization_feature_cols]
-        num_norm_cols = len(norm_indices)
+        def build_data_(data):
+            # X:(N,T,F) Y:(N,T,L)
+            X = []
+            Y = []
 
-        self.train_Seq_X_normalization = self.train_Seq_X.copy()
-        train_to_scale = self.train_Seq_X[..., norm_indices].reshape(-1, num_norm_cols)
-        scaled_train = scalerX.fit_transform(train_to_scale).reshape(self.train_Seq_X.shape[0], self.train_Seq_X.shape[1],self.train_Seq_X.shape[2], num_norm_cols)
-        self.train_Seq_X_normalization[..., norm_indices] = scaled_train
+            for id_val in self.id_set:
+                group = data[data["id_col"] == id_val]
+                X.append(group[self.feature_cols].values)
+                Y.append(group[self.target_cols].values)
+            X = np.stack(X, axis=0)
+            Y = np.stack(Y, axis=0)
 
-        self.val_Seq_X_normalization = self.val_Seq_X.copy()
-        val_to_scale = self.val_Seq_X[..., norm_indices].reshape(-1, num_norm_cols)
-        scaled_val = scalerX.transform(val_to_scale).reshape(self.val_Seq_X.shape[0], self.val_Seq_X.shape[1],self.val_Seq_X.shape[2], num_norm_cols)
-        self.val_Seq_X_normalization[..., norm_indices] = scaled_val
+            # Seq_X:(S,N,WS,F) Seq_Y:(S,N,WS,L)
+            Seq_X = []
+            Seq_Y = []
 
-        self.test_Seq_X_normalization = self.test_Seq_X.copy()
-        test_to_scale = self.test_Seq_X[..., norm_indices].reshape(-1, num_norm_cols)
-        scaled_test = scalerX.transform(test_to_scale).reshape(self.test_Seq_X.shape[0], self.test_Seq_X.shape[1],self.test_Seq_X.shape[2], num_norm_cols)
-        self.test_Seq_X_normalization[..., norm_indices] = scaled_test
+            window_size = self.args.window_size
+            _, T, _ = X.shape
+            S = T - window_size + 1
 
-        self.scalerX = {
-            "norm_indices": norm_indices,
-            "mean": scalerX.mean_,
-            "var": scalerX.var_,
-        }
+            for s in range(S):
+                Seq_X.append(X[:, s:s+window_size, :])  # (N, WS, F)
+                Seq_Y.append(Y[:, s:s+window_size, :])  # (N, WS, L)
 
-        scalerY = StandardScaler()
-        norm_indices = [self.target_cols.index(col) for col in self.normalization_target_cols]
-        num_norm_cols = len(norm_indices)
+            Seq_X = np.stack(Seq_X, axis=0)
+            Seq_Y = np.stack(Seq_Y, axis=0)
 
-        self.train_Seq_Y_normalization = self.train_Seq_Y.copy()
-        train_to_scale = self.train_Seq_Y[..., norm_indices].reshape(-1, num_norm_cols)
-        scaled_train = scalerY.fit_transform(train_to_scale).reshape(self.train_Seq_Y.shape[0], self.train_Seq_Y.shape[1],self.train_Seq_Y.shape[2], num_norm_cols)
-        self.train_Seq_Y_normalization[..., norm_indices] = scaled_train
+            return X,Y,Seq_X,Seq_Y
 
-        self.val_Seq_Y_normalization = self.val_Seq_Y.copy()
-        val_to_scale = self.val_Seq_Y[..., norm_indices].reshape(-1, num_norm_cols)
-        scaled_val = scalerY.transform(val_to_scale).reshape(self.val_Seq_Y.shape[0], self.val_Seq_Y.shape[1],self.val_Seq_Y.shape[2], num_norm_cols)
-        self.val_Seq_Y_normalization[..., norm_indices] = scaled_val
+        train_data = self.data[self.data["train_split"]==True]
+        val_data = self.data[self.data["val_split"]==True]
+        test_data = self.data[self.data["test_split"]==True]
 
-        self.test_Seq_Y_normalization = self.test_Seq_Y.copy()
-        test_to_scale = self.test_Seq_Y[..., norm_indices].reshape(-1, num_norm_cols)
-        scaled_test = scalerY.transform(test_to_scale).reshape(self.test_Seq_Y.shape[0], self.test_Seq_Y.shape[1],self.test_Seq_Y.shape[2], num_norm_cols)
-        self.test_Seq_Y_normalization[..., norm_indices] = scaled_test
+        X_train,Y_train,Seq_X_train,Seq_Y_train = build_data_(train_data)
+        X_val,Y_val,Seq_X_val,Seq_Y_val = build_data_(val_data)
+        X_test,Y_test,Seq_X_test,Seq_Y_test = build_data_(test_data)
 
-        self.scalerY = {
-            "norm_indices": norm_indices,
-            "mean": scalerY.mean_,
-            "var": scalerY.var_,
-        }
-
-    @staticmethod
-    def inverse_scale(data, scaler):
-        data_denorm = data.copy()
-        
-        norm_indices = scaler["norm_indices"]
-        mean = scaler["mean"]
-        var = scaler["var"]
-        std = np.sqrt(var)
-        
-        for i, col_idx in enumerate(norm_indices):
-            data_denorm[:, col_idx] = data[:, col_idx] * std[i] + mean[i]
-        return data_denorm
-
-    # 保存
-    def save_data(self):
         save_data = {
             "train":{
-                "X": self.train_Seq_X_normalization,
-                "Y": self.train_Seq_Y_normalization,
+                "X": X_train,
+                "Y": Y_train,
+                "Seq_X": Seq_X_train,
+                "Seq_Y": Seq_Y_train,
             },
             "val":{
-                "X": self.val_Seq_X_normalization,
-                "Y": self.val_Seq_Y_normalization,
+                "X": X_val,
+                "Y": Y_val,
+                "Seq_X": Seq_X_val,
+                "Seq_Y": Seq_Y_val,
             },
             "test":{
-                "X": self.test_Seq_X_normalization,
-                "Y": self.test_Seq_Y_normalization,
+                "X": X_test,
+                "Y": Y_test,
+                "Seq_X": Seq_X_test,
+                "Seq_Y": Seq_Y_test,
             },
-            "scalerX": self.scalerX,
-            "scalerY": self.scalerY,
+            "feature_cols": self.feature_cols,
+            "target_cols": self.target_cols,
+            "scaler": {
+                "mean": self.scaler_mean,
+                "std": self.scaler_std,
+            },
         }
 
         with open(self.args.output_path, "wb") as f:
             pickle.dump(save_data, f)
         ...
 
+    @staticmethod
+    def inverse_scale(data:np.ndarray,data_cols:list,scaler:dict):
+        data_denorm = data.copy()
+        scaler_cols=list(scaler["mean"].keys())
+        for index,col in enumerate(data_cols):
+            if col in scaler_cols:
+                data_denorm[...,index] = data[...,index] * scaler["std"][col] + scaler["mean"][col]
+        return data_denorm
+
+
 
 if __name__ == '__main__':
-    config_path = "utils/data_processing_config/sse50.yaml"
-    # config_path = "utils/data_processing_config/sse50_AR.yaml"
+    config_path = "utils/data_processing_config/hgjj.yaml"
 
     args = DataProcessingArgs.from_yaml(config_path)
     DataProcessing(args)

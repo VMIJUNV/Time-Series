@@ -65,7 +65,7 @@ class Transformer(nn.Module):
         out = self.encoder(x)
 
         # 取最后一个时间步（和 LSTM 一样）
-        out = out[:, -1, :]  # (B, hidden_size)
+        out = out[:, -1:, :]  # (B, hidden_size)
 
         out = self.fc(out)   # (B, output_size)
         return out
