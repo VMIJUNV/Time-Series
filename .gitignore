@@ -221,5 +221,7 @@ __marimo__/
 *.pkl
 *.xlsx
 
+/utils/Diebold-Mariano_res
+
 
 /废案子

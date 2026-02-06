@@ -6,7 +6,8 @@ from torch.utils.data import DataLoader
 from .data_processing import DataProcessing
 import matplotlib.pyplot as plt
 from pathlib import Path
-
+import pickle
+import json
 
 class BaseEvaluator(ABC):
     def __init__(self):
@@ -28,28 +29,24 @@ class BaseEvaluator(ABC):
                     pred,label = self.test_forward(batch)
                     pred_list.append(pred[:,0,:].cpu().numpy())
                     label_list.append(label[:,0,:].cpu().numpy())
-        
-        show_pred=pred_list[show_id]
-        show_label=label_list[show_id]
+
         target_cols=self.test_dataset_one_step.target_cols
-        if hasattr(self.test_dataset_one_step, "scaler"):
-            show_pred = DataProcessing.inverse_scale(show_pred,self.test_dataset_one_step.target_cols,self.test_dataset_one_step.scaler)
-            show_label = DataProcessing.inverse_scale(show_label,self.test_dataset_one_step.target_cols,self.test_dataset_one_step.scaler)
-        self.show(show_pred,show_label,target_cols,f"one_step_sample_{show_id}.pdf")
 
-        preds = np.concatenate(pred_list, axis=0)
-        labels = np.concatenate(label_list, axis=0)
-
+        preds=np.array(pred_list)
+        labels=np.array(label_list)
+        origin_preds=preds.copy()
+        origin_labels=labels.copy()
         if hasattr(self.test_dataset_one_step, "scaler"):
             preds = DataProcessing.inverse_scale(preds,self.test_dataset_one_step.target_cols,self.test_dataset_one_step.scaler)
             labels = DataProcessing.inverse_scale(labels,self.test_dataset_one_step.target_cols,self.test_dataset_one_step.scaler)
 
-        mse = np.mean((preds - labels) ** 2, axis=0)
-        res={}
+        self.save_data(preds,labels,origin_preds,origin_labels,target_cols,"one_step")
         
-        for dim in range(len(target_cols)):
-            res[target_cols[dim]]=float(mse[dim])
-        print(f"one_step mse: {res}")
+        show_pred=preds[show_id,...]
+        show_label=labels[show_id,...]
+        self.show(show_pred,show_label,target_cols,f"one_step_sample_{show_id}")
+
+        self.statistics(preds,labels,target_cols,"one_step")
 
 
     def eval_multiple_steps(self,show_id=0):
@@ -96,26 +93,79 @@ class BaseEvaluator(ABC):
                 pred_list.append(pred)
                 label_list.append(label)
 
-
-        show_pred=pred_list[show_id]
-        show_label=label_list[show_id]
-        if hasattr(self.test_dataset_multiple_steps, "scaler"):
-            show_pred = DataProcessing.inverse_scale(show_pred,self.test_dataset_multiple_steps.target_cols,self.test_dataset_multiple_steps.scaler)
-            show_label = DataProcessing.inverse_scale(show_label,self.test_dataset_multiple_steps.target_cols,self.test_dataset_multiple_steps.scaler)
-        self.show(show_pred,show_label,target_cols,f"multiple_step_sample_{show_id}.pdf")
-        
-        preds = np.concatenate(pred_list, axis=0)
-        labels = np.concatenate(label_list, axis=0)
+        preds=np.array(pred_list)
+        labels=np.array(label_list)
+        origin_preds=preds.copy()
+        origin_labels=labels.copy()
         if hasattr(self.test_dataset_multiple_steps, "scaler"):
             preds = DataProcessing.inverse_scale(preds,self.test_dataset_multiple_steps.target_cols,self.test_dataset_multiple_steps.scaler)
             labels = DataProcessing.inverse_scale(labels,self.test_dataset_multiple_steps.target_cols,self.test_dataset_multiple_steps.scaler)
 
-        mse = np.mean((preds - labels) ** 2, axis=0)
-        res={}
-        for dim in range(len(target_cols)):
-            res[target_cols[dim]]=float(mse[dim])
-        print(f"multiple_steps mse: {res}")
+        self.save_data(preds,labels,origin_preds,origin_labels,target_cols,"multiple_steps")
 
+        show_pred=preds[show_id,...]
+        show_label=labels[show_id,...]
+        self.show(show_pred,show_label,target_cols,f"multiple_step_sample_{show_id}")
+
+        self.statistics(preds,labels,target_cols,"multiple_steps")
+
+    def save_data(self,preds,labels,origin_preds,origin_labels,target_cols,name):
+        res_path=Path(self.args["output_path"])
+        res_path.mkdir(parents=True, exist_ok=True)
+        eval_data={
+            "preds":preds,
+            "labels":labels,
+            "origin_preds":origin_preds,
+            "origin_labels":origin_labels,
+            "target_cols":target_cols,
+        }
+        with open(res_path/ f"{name}_data.pkl", "wb") as f:
+            pickle.dump(eval_data, f)
+
+    def statistics(self,preds,labels,target_cols,name):
+        res_path=Path(self.args["output_path"])
+        res_path.mkdir(parents=True, exist_ok=True)
+
+        axis = (0, 1)
+        # 1. MSE
+        mse = np.mean((preds - labels) ** 2, axis=axis)
+
+        # 2. RMSE
+        rmse = np.sqrt(mse)
+
+        # 3. MAE
+        mae = np.mean(np.abs(preds - labels), axis=axis)
+
+        # 4. MAPE
+        eps = 1e-8  # 防止除零的小常数（也可用 mask 方式）
+        mape = np.mean(
+            np.abs((labels - preds) / np.where(np.abs(labels) < eps, eps, np.abs(labels))),
+            axis=axis
+        ) * 100  # 转换为百分比
+
+        # 5. SMAPE
+        smape = np.mean(
+            2.0 * np.abs(preds - labels) / (np.abs(labels) + np.abs(preds) + eps),
+            axis=axis
+        ) * 100
+
+        # 6. R² (coefficient of determination)
+        ss_res = np.sum((labels - preds) ** 2, axis=axis)  # (F,)
+        ss_tot = np.sum((labels - np.mean(labels, axis=axis, keepdims=True)) ** 2, axis=axis)
+        r2 = np.where(ss_tot < eps, 1.0, 1 - ss_res / ss_tot)
+
+        res = {
+            "mse": {col: float(mse[dim]) for dim, col in enumerate(target_cols)},
+            "rmse": {col: float(rmse[dim]) for dim, col in enumerate(target_cols)},
+            "mae": {col: float(mae[dim]) for dim, col in enumerate(target_cols)},
+            "mape (%)": {col: float(mape[dim]) for dim, col in enumerate(target_cols)},
+            "smape (%)": {col: float(smape[dim]) for dim, col in enumerate(target_cols)},
+            "r2": {col: float(r2[dim]) for dim, col in enumerate(target_cols)},
+        }
+        print(f"name: {name}")
+        print(res)
+        with open(res_path/ f"{name}_stats.json", "w") as f:
+            json.dump(res, f, indent=4)
 
     def show(self,pred,label,target_cols,name):
         res_path=Path(self.args["output_path"])
@@ -135,4 +185,4 @@ class BaseEvaluator(ABC):
             axs[dim].legend()
 
         fig.tight_layout()
-        fig.savefig( res_path/ name)
+        fig.savefig( res_path/ f"{name}.pdf")
